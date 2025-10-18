@@ -52,11 +52,9 @@ jobs:
         id: version
         run: |
           cd ryujinx
-          # Get version from git tags/describe
+          # Get version from git tags/describe and add -patched suffix
           VERSION=$(git describe --tags --always 2>/dev/null || echo "unknown")
-          # Clean up version (remove leading 'v' or 'Canary-' if present)
-          VERSION=${VERSION#v}
-          VERSION=${VERSION#Canary-}
+          VERSION="${VERSION}-patched"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Using version: $VERSION"
 
@@ -96,11 +94,17 @@ jobs:
           cd ryujinx
           tar -czf ../ryujinx-${{ matrix.fork.name }}-linux-arm64-patched.tar.gz -C publish .
 
+      - name: Save version info
+        run: |
+          echo "${{ steps.version.outputs.version }}" > version-${{ matrix.fork.name }}.txt
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ryujinx-${{ matrix.fork.name }}-linux-arm64-${{ steps.git_hash.outputs.hash }}
-          path: ryujinx-${{ matrix.fork.name }}-linux-arm64-patched.tar.gz
+          path: |
+            ryujinx-${{ matrix.fork.name }}-linux-arm64-patched.tar.gz
+            version-${{ matrix.fork.name }}.txt
           retention-days: 30
 
   create_release:
@@ -125,14 +129,20 @@ jobs:
           TAG="patched-$(date +'%Y%m%d-%H%M%S')"
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
+      - name: Extract version info
+        id: versions
+        run: |
+          RYUBING_VERSION=$(find artifacts -name "version-ryubing.txt" -exec cat {} \;)
+          KENJI_VERSION=$(find artifacts -name "version-kenji-nx.txt" -exec cat {} \;)
+          echo "ryubing=$RYUBING_VERSION" >> $GITHUB_OUTPUT
+          echo "kenji=$KENJI_VERSION" >> $GITHUB_OUTPUT
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: "Patched Ryujinx ARM64 - ${{ steps.tag.outputs.tag }}"
           body: |
-            # Pre-built Patched Ryujinx ARM64 Binaries
-
             Automated build with occlusion query fallback patches for RK3588/Mali-G610.
 
             ## Available Forks
@@ -149,8 +159,12 @@ jobs:
             - Princess Peach: Showtime! (01007a3009184000)
 
             ## Build Info
-            - **ryubing commit:** `fdbdb05cb583a1604ada310d160791bd945f758e`
-            - **kenji-nx commit:** `f908bfe150934296766904bf325889a7df3ac18b`
+            - **ryubing:**
+              - Version: `${{ steps.versions.outputs.ryubing }}`
+              - Commit: `fdbdb05cb583a1604ada310d160791bd945f758e`
+            - **kenji-nx:**
+              - Version: `${{ steps.versions.outputs.kenji }}`
+              - Commit: `f908bfe150934296766904bf325889a7df3ac18b`
           files: |
             artifacts/**/*.tar.gz
           draft: false
