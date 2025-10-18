@@ -96,7 +96,7 @@ jobs:
     name: Create Release
     needs: build
     runs-on: ubuntu-latest
-    if: github.event.inputs.create_release == 'true' || github.ref == 'refs/heads/master'
+    if: github.event.inputs.create_release == 'true' || github.ref == 'refs/heads/main'
     permissions:
       contents: write
     steps:
