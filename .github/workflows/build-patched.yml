@@ -52,11 +52,19 @@ jobs:
         id: version
         run: |
           cd ryujinx
-          # Get version from git tags/describe and add -patched suffix
-          VERSION=$(git describe --tags --always 2>/dev/null || echo "unknown")
-          VERSION="${VERSION}-patched"
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Using version: $VERSION"
+          # Get version from git tags/describe
+          FULL_VERSION=$(git describe --tags --always 2>/dev/null || echo "unknown")
+          DISPLAY_VERSION="${FULL_VERSION}-patched"
+
+          # Strip "Canary-" and "v" prefix for dotnet build (SemVer requirement)
+          BUILD_VERSION="${FULL_VERSION#v}"
+          BUILD_VERSION="${BUILD_VERSION#Canary-}"
+          BUILD_VERSION="${BUILD_VERSION}-patched"
+
+          echo "version=$BUILD_VERSION" >> $GITHUB_OUTPUT
+          echo "display_version=$DISPLAY_VERSION" >> $GITHUB_OUTPUT
+          echo "Using build version: $BUILD_VERSION"
+          echo "Using display version: $DISPLAY_VERSION"
 
       - name: Setup .NET SDK
         uses: actions/setup-dotnet@v4
@@ -96,7 +104,7 @@ jobs:
 
       - name: Save version info
         run: |
-          echo "${{ steps.version.outputs.version }}" > version-${{ matrix.fork.name }}.txt
+          echo "${{ steps.version.outputs.display_version }}" > version-${{ matrix.fork.name }}.txt
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
