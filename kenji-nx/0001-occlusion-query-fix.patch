@@ -16,7 +16,7 @@ Key features:
 - Applies fallback at query creation and on timeout
 
 Affected titles with ForceNonZero overrides (previously frozen at boot):
-- Mario Kart 8 Deluxe (0100152000022000)
+- MK8 Deluxe (0100152000022000)
 - Crash Bandicoot 4: It's About Time (010073401175e000)
 - Little Nightmares series (01002fc00412c000, 010097100edd6000,
   010066101a55a000)
@@ -190,7 +190,7 @@ index 000000000..daa46668a
 +    {
 +        private static readonly Dictionary<string, OcclusionQueryFallbackMode> _overrides = new(StringComparer.OrdinalIgnoreCase)
 +        {
-+            // Mario Kart 8 Deluxe
++            // MK8 Deluxe
 +            ["0100152000022000"] = OcclusionQueryFallbackMode.ForceNonZero,
 +            // Crash Bandicoot 4: It's About Time
 +            ["010073401175e000"] = OcclusionQueryFallbackMode.ForceNonZero,

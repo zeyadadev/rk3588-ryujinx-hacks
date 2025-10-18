@@ -107,7 +107,7 @@ Ryujinx creates host-visible GPU buffers for occlusion queries and writes a sent
 
 **The Fix:**
 After 5000 polling attempts with no change (~5 seconds), the patch detects the stuck query and writes a fallback value (0 or 1) to the buffer. Game-specific overrides determine which fallback to use:
-- **ForceNonZero** (value: 1) - For games that need visible pixels reported (Mario Kart 8, etc.)
+- **ForceNonZero** (value: 1) - For games that need visible pixels reported (MK8, etc.)
 - **ForceZero** (value: 0) - For games expecting hidden geometry
 
 Overrides are automatically applied based on title ID when games load.

@@ -17,7 +17,6 @@ on:
 env:
   DOTNET_CLI_TELEMETRY_OPTOUT: 1
   DOTNET_NOLOGO: true
-  RYUJINX_BASE_VERSION: "1.2.0"
 
 jobs:
   build:
@@ -49,6 +48,18 @@ jobs:
           cd ryujinx
           git checkout ${{ matrix.fork.commit }}
 
+      - name: Get version from fork
+        id: version
+        run: |
+          cd ryujinx
+          # Get version from git tags/describe
+          VERSION=$(git describe --tags --always 2>/dev/null || echo "unknown")
+          # Clean up version (remove leading 'v' or 'Canary-' if present)
+          VERSION=${VERSION#v}
+          VERSION=${VERSION#Canary-}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Using version: $VERSION"
+
       - name: Setup .NET SDK
         uses: actions/setup-dotnet@v4
         with:
@@ -69,7 +80,7 @@ jobs:
         run: |
           cd ryujinx
           dotnet publish -c Release -r linux-arm64 -o ./publish \
-            -p:Version="${{ env.RYUJINX_BASE_VERSION }}" \
+            -p:Version="${{ steps.version.outputs.version }}" \
             -p:DebugType=embedded \
             -p:SourceRevisionId="${{ steps.git_hash.outputs.hash }}" \
             -p:ExtraDefineConstants=DISABLE_UPDATER \
@@ -129,36 +140,17 @@ jobs:
             - **kenji-nx** - Occlusion query patch + SDL2 package replaced with ryubing's version for Wayland support
 
             ## Platform
-            - `linux-arm64` - For RK3588, Orange Pi 5, Rock 5B, and similar ARM64 SoCs
-
-            ## Installation
-            ```bash
-            # Download and extract
-            tar -xzf ryujinx-<fork>-linux-arm64-patched.tar.gz
-
-            # Run with optimal settings for Mali-G610
-            SDL_VIDEODRIVER=wayland ./Ryujinx \
-                --no-gui \
-                --disable-docked-mode \
-                --exclusive-fullscreen \
-                --exclusive-fullscreen-width 1280 \
-                --exclusive-fullscreen-height 720 \
-                --graphics-backend Vulkan \
-                --resolution-scale 0.75 \
-                /path/to/game.nsp
-            ```
+            - `linux-arm64` - For RK3588 and similar ARM64 SoCs
 
             ## Fixed Games
-            - Mario Kart 8 Deluxe (0100152000022000)
+            - MK8 Deluxe (0100152000022000)
             - Crash Bandicoot 4: It's About Time (010073401175e000)
             - Little Nightmares series
             - Princess Peach: Showtime! (01007a3009184000)
 
             ## Build Info
-            - **Base Version:** ${{ env.RYUJINX_BASE_VERSION }}
             - **ryubing commit:** `fdbdb05cb583a1604ada310d160791bd945f758e`
             - **kenji-nx commit:** `f908bfe150934296766904bf325889a7df3ac18b`
-            - **Build flags:** DebugType=embedded, DISABLE_UPDATER
           files: |
             artifacts/**/*.tar.gz
           draft: false
