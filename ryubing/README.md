@@ -27,7 +27,7 @@ dotnet publish -c Release -r linux-arm64 -o ./publish \
 ## Documentation
 
 See the [main README](../README.md) for:
-- Prerequisites (.NET SDK, build dependencies)
+- Prerequisites (.NET SDK)
 - Performance optimization (Mali-G610 specific settings)
 - Technical details about the patch
 

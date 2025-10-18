@@ -23,11 +23,6 @@ This repository **only** provides patches for Mali GPU-specific issues (occlusio
 
 For all other emulator-related issues (gameplay, compatibility, performance, features, etc.), please visit the upstream Ryujinx fork repositories.
 
-## Available For
-
-- **[ryubing fork](ryubing/README.md)**
-- **[kenji-nx fork](kenji-nx/README.md)** 
-
 ## Quick Start
 
 ### Option 1: Download Pre-built Binaries (Recommended)
@@ -103,7 +98,7 @@ SDL_VIDEODRIVER=wayland ./publish/Ryujinx \
 ## What the Patch Does
 
 **The Problem:**
-Ryujinx creates host-visible GPU buffers for occlusion queries and writes a sentinel value (`0xFFFFFFFEFFFFFFFE`) to mark them as "waiting for result". After issuing the query, it polls the buffer expecting the Vulkan driver to overwrite the sentinel with the actual result. On Mali GPUs, the driver never writes the result back to host memory, leaving the buffer stuck at the sentinel value. Games polling for these results wait indefinitely and freeze.
+Ryujinx creates host-visible GPU buffers for occlusion queries and writes a sentinel value (`0xFFFFFFFEFFFFFFFE`) to mark them as "waiting for result". After issuing the query, it polls the buffer expecting the Vulkan driver to overwrite the sentinel with the actual result. On Mali-G610 GPU, the libmali driver never writes the result back to host memory, leaving the buffer stuck at the sentinel value. Games polling for these results wait indefinitely and freeze.
 
 **The Fix:**
 After 5000 polling attempts with no change (~5 seconds), the patch detects the stuck query and writes a fallback value (0 or 1) to the buffer. Game-specific overrides determine which fallback to use:
