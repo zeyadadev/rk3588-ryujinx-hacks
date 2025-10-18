@@ -1,0 +1,167 @@
+name: Build Patched Ryujinx ARM64
+
+on:
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Create a GitHub release'
+        required: false
+        type: boolean
+        default: false
+  push:
+    paths:
+      - 'ryubing/*.patch'
+      - 'kenji-nx/*.patch'
+      - '.github/workflows/build-patched.yml'
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  DOTNET_NOLOGO: true
+  RYUJINX_BASE_VERSION: "1.2.0"
+
+jobs:
+  build:
+    name: Build ${{ matrix.fork.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        fork:
+          - name: ryubing
+            repo: https://git.ryujinx.app/ryubing/ryujinx.git
+            commit: fdbdb05cb583a1604ada310d160791bd945f758e
+            patch: ryubing/0001-occlusion-query-fix.patch
+          - name: kenji-nx
+            repo: https://git.ryujinx.app/kenji-nx/ryujinx.git
+            commit: f908bfe150934296766904bf325889a7df3ac18b
+            patch: kenji-nx/0001-occlusion-query-fix.patch
+
+    steps:
+      - name: Checkout patches repository
+        uses: actions/checkout@v4
+        with:
+          path: patches
+
+      - name: Clone Ryujinx fork
+        run: |
+          git clone ${{ matrix.fork.repo }} ryujinx
+          cd ryujinx
+          git checkout ${{ matrix.fork.commit }}
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: ryujinx/global.json
+
+      - name: Apply patch
+        run: |
+          cd ryujinx
+          git apply ../patches/${{ matrix.fork.patch }}
+
+      - name: Get short commit hash
+        id: git_hash
+        run: |
+          cd ryujinx
+          echo "hash=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Build Ryujinx ARM64
+        run: |
+          cd ryujinx
+          dotnet publish -c Release -r linux-arm64 -o ./publish \
+            -p:Version="${{ env.RYUJINX_BASE_VERSION }}" \
+            -p:DebugType=embedded \
+            -p:SourceRevisionId="${{ steps.git_hash.outputs.hash }}" \
+            -p:ExtraDefineConstants=DISABLE_UPDATER \
+            src/Ryujinx --self-contained
+
+      - name: Set executable permissions
+        run: |
+          cd ryujinx/publish
+          chmod +x Ryujinx Ryujinx.sh
+
+      - name: Create archive
+        run: |
+          cd ryujinx
+          tar -czf ../ryujinx-${{ matrix.fork.name }}-linux-arm64-patched.tar.gz -C publish .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ryujinx-${{ matrix.fork.name }}-linux-arm64-${{ steps.git_hash.outputs.hash }}
+          path: ryujinx-${{ matrix.fork.name }}-linux-arm64-patched.tar.gz
+          retention-days: 30
+
+  create_release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event.inputs.create_release == 'true' || github.ref == 'refs/heads/master'
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Generate release tag
+        id: tag
+        run: |
+          TAG="patched-$(date +'%Y%m%d-%H%M%S')"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: "Patched Ryujinx ARM64 - ${{ steps.tag.outputs.tag }}"
+          body: |
+            # Pre-built Patched Ryujinx ARM64 Binaries
+
+            Automated build with occlusion query fallback patches for RK3588/Mali-G610.
+
+            ## Available Forks
+            - **ryubing** - Occlusion query patch only
+            - **kenji-nx** - Occlusion query patch + SDL2 package replaced with ryubing's version for Wayland support
+
+            ## Platform
+            - `linux-arm64` - For RK3588, Orange Pi 5, Rock 5B, and similar ARM64 SoCs
+
+            ## Installation
+            ```bash
+            # Download and extract
+            tar -xzf ryujinx-<fork>-linux-arm64-patched.tar.gz
+
+            # Run with optimal settings for Mali-G610
+            SDL_VIDEODRIVER=wayland ./Ryujinx \
+                --no-gui \
+                --disable-docked-mode \
+                --exclusive-fullscreen \
+                --exclusive-fullscreen-width 1280 \
+                --exclusive-fullscreen-height 720 \
+                --graphics-backend Vulkan \
+                --resolution-scale 0.75 \
+                /path/to/game.nsp
+            ```
+
+            ## Fixed Games
+            - Mario Kart 8 Deluxe (0100152000022000)
+            - Crash Bandicoot 4: It's About Time (010073401175e000)
+            - Little Nightmares series
+            - Princess Peach: Showtime! (01007a3009184000)
+
+            ## Build Info
+            - **Base Version:** ${{ env.RYUJINX_BASE_VERSION }}
+            - **ryubing commit:** `fdbdb05cb583a1604ada310d160791bd945f758e`
+            - **kenji-nx commit:** `f908bfe150934296766904bf325889a7df3ac18b`
+            - **Build flags:** DebugType=embedded, DISABLE_UPDATER
+          files: |
+            artifacts/**/*.tar.gz
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

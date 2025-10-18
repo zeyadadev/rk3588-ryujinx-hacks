@@ -1,0 +1,341 @@
+From 321b518e59441f0108bb4203b7f61f2c04b67fee Mon Sep 17 00:00:00 2001
+From: Ayman Zeyada <zeyada.ayman@gmail.com>
+Date: Sat, 18 Oct 2025 15:09:26 +0300
+Subject: [PATCH] GPU: Add configurable occlusion query fallback to fix game
+ freezes
+
+Implements a fallback mechanism for occlusion queries that fail to return
+results, which was causing certain games to freeze and never enter gameplay.
+These games wait indefinitely for occlusion query results that never arrive
+on some host configurations.
+
+Key features:
+- Thread-safe global configuration via OcclusionQueryConfig
+- Three modes: Automatic (default), ForceZero, ForceNonZero
+- Title-specific overrides for known problematic games
+- Applies fallback at query creation and on timeout
+
+Affected titles with ForceNonZero overrides (previously frozen at boot):
+- Mario Kart 8 Deluxe (0100152000022000)
+- Crash Bandicoot 4: It's About Time (010073401175e000)
+- Little Nightmares series (01002fc00412c000, 010097100edd6000,
+  010066101a55a000)
+- Princess Peach: Showtime! (01007a3009184000)
+---
+ Directory.Packages.props                      |  2 +-
+ .../Multithreading/ThreadedRenderer.cs        | 15 +++++
+ .../OcclusionQueryConfig.cs                   | 60 +++++++++++++++++++
+ .../OcclusionQueryFallbackMode.cs             | 23 +++++++
+ .../OcclusionQueryFallbackOverrides.cs        | 46 ++++++++++++++
+ .../Queries/BufferedQuery.cs                  | 19 ++++++
+ src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs | 12 ++++
+ .../Extensions/FileSystemExtensions.cs        |  5 +-
+ .../Loaders/Processes/ProcessLoader.cs        |  5 +-
+ .../Ryujinx.SDL2.Common.csproj                |  2 +-
+ 10 files changed, 185 insertions(+), 4 deletions(-)
+ create mode 100644 src/Ryujinx.Graphics.GAL/OcclusionQueryConfig.cs
+ create mode 100644 src/Ryujinx.Graphics.GAL/OcclusionQueryFallbackMode.cs
+ create mode 100644 src/Ryujinx.Graphics.Gpu/OcclusionQueryFallbackOverrides.cs
+
+diff --git a/Directory.Packages.props b/Directory.Packages.props
+index 9f8686c14..895ad0139 100644
+--- a/Directory.Packages.props
++++ b/Directory.Packages.props
+@@ -37,7 +37,7 @@
+     <PackageVersion Include="Ryujinx.Graphics.Nvdec.Dependencies.Windows" Version="6.1.3-build5" />
+     <PackageVersion Include="Ryujinx.Graphics.Vulkan.Dependencies.MoltenVK" Version="1.2.0" />
+     <PackageVersion Include="Ryujinx.LibHac" Version="0.21.0-alpha.117" />
+-    <PackageVersion Include="Ryujinx.SDL2-CS-Redux" Version="2.32.10" />
++    <PackageVersion Include="Ryujinx.SDL2-CS" Version="2.30.0-build32" />
+     <PackageVersion Include="securifybv.ShellLink" Version="0.1.0" />
+     <PackageVersion Include="shaderc.net" Version="0.1.0" />
+     <PackageVersion Include="SharpZipLib" Version="1.4.2" />
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs b/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
+index 1750e348f..82a4ff6ba 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
+@@ -433,6 +433,21 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+ 
+         public ICounterEvent ReportCounter(CounterType type, EventHandler<ulong> resultHandler, float divisor, bool hostReserved)
+         {
++            if (type == CounterType.SamplesPassed)
++            {
++                OcclusionQueryFallbackMode mode = OcclusionQueryConfig.CurrentMode;
++
++                if (mode == OcclusionQueryFallbackMode.ForceZero || mode == OcclusionQueryFallbackMode.ForceNonZero)
++                {
++                    ulong fallback = mode == OcclusionQueryFallbackMode.ForceZero ? 0ul : 1ul;
++                    resultHandler?.Invoke(null, fallback);
++
++                    _lastSampleCounterClear = false;
++
++                    return null;
++                }
++            }
++
+             ThreadedCounterEvent evt = new(this, type, _lastSampleCounterClear);
+             New<ReportCounterCommand>().Set(Ref(evt), type, Ref(resultHandler), divisor, hostReserved);
+             QueueCommand();
+diff --git a/src/Ryujinx.Graphics.GAL/OcclusionQueryConfig.cs b/src/Ryujinx.Graphics.GAL/OcclusionQueryConfig.cs
+new file mode 100644
+index 000000000..04e466bca
+--- /dev/null
++++ b/src/Ryujinx.Graphics.GAL/OcclusionQueryConfig.cs
+@@ -0,0 +1,60 @@
++namespace Ryujinx.Graphics.GAL
++{
++    /// <summary>
++    /// Global configuration for occlusion query behaviour.
++    /// </summary>
++    public static class OcclusionQueryConfig
++    {
++        private static readonly object _lock = new object();
++        private static OcclusionQueryFallbackMode _baseMode = OcclusionQueryFallbackMode.Automatic;
++        private static OcclusionQueryFallbackMode _currentMode = OcclusionQueryFallbackMode.Automatic;
++
++        /// <summary>
++        /// Gets or sets the base configuration mode. Setting this value resets the current mode.
++        /// </summary>
++        public static OcclusionQueryFallbackMode BaseMode
++        {
++            get
++            {
++                lock (_lock)
++                {
++                    return _baseMode;
++                }
++            }
++            set
++            {
++                lock (_lock)
++                {
++                    _baseMode = value;
++                    _currentMode = value;
++                }
++            }
++        }
++
++        /// <summary>
++        /// Gets the mode currently in effect after applying any overrides.
++        /// </summary>
++        public static OcclusionQueryFallbackMode CurrentMode
++        {
++            get
++            {
++                lock (_lock)
++                {
++                    return _currentMode;
++                }
++            }
++        }
++
++        /// <summary>
++        /// Applies an override mode. Automatic restores the base mode.
++        /// </summary>
++        /// <param name="overrideMode">Override mode to apply.</param>
++        public static void ApplyOverride(OcclusionQueryFallbackMode overrideMode)
++        {
++            lock (_lock)
++            {
++                _currentMode = overrideMode == OcclusionQueryFallbackMode.Automatic ? _baseMode : overrideMode;
++            }
++        }
++    }
++}
+diff --git a/src/Ryujinx.Graphics.GAL/OcclusionQueryFallbackMode.cs b/src/Ryujinx.Graphics.GAL/OcclusionQueryFallbackMode.cs
+new file mode 100644
+index 000000000..26eab132a
+--- /dev/null
++++ b/src/Ryujinx.Graphics.GAL/OcclusionQueryFallbackMode.cs
+@@ -0,0 +1,23 @@
++namespace Ryujinx.Graphics.GAL
++{
++    /// <summary>
++    /// Describes how occlusion query results should behave when the host fails to provide them.
++    /// </summary>
++    public enum OcclusionQueryFallbackMode
++    {
++        /// <summary>
++        /// Do not override occlusion query results.
++        /// </summary>
++        Automatic = 0,
++
++        /// <summary>
++        /// Force occlusion queries to return zero when the host does not provide a result.
++        /// </summary>
++        ForceZero,
++
++        /// <summary>
++        /// Force occlusion queries to return a non-zero value when the host does not provide a result.
++        /// </summary>
++        ForceNonZero,
++    }
++}
+diff --git a/src/Ryujinx.Graphics.Gpu/OcclusionQueryFallbackOverrides.cs b/src/Ryujinx.Graphics.Gpu/OcclusionQueryFallbackOverrides.cs
+new file mode 100644
+index 000000000..daa46668a
+--- /dev/null
++++ b/src/Ryujinx.Graphics.Gpu/OcclusionQueryFallbackOverrides.cs
+@@ -0,0 +1,46 @@
++using Ryujinx.Graphics.GAL;
++using System;
++using System.Collections.Generic;
++
++namespace Ryujinx.Graphics.Gpu
++{
++    /// <summary>
++    /// Provides title specific overrides for occlusion query fallback behaviour.
++    /// </summary>
++    public static class OcclusionQueryFallbackOverrides
++    {
++        private static readonly Dictionary<string, OcclusionQueryFallbackMode> _overrides = new(StringComparer.OrdinalIgnoreCase)
++        {
++            // Mario Kart 8 Deluxe
++            ["0100152000022000"] = OcclusionQueryFallbackMode.ForceNonZero,
++            // Crash Bandicoot 4: It's About Time
++            ["010073401175e000"] = OcclusionQueryFallbackMode.ForceNonZero,
++            // Little Nightmares
++            ["01002fc00412c000"] = OcclusionQueryFallbackMode.ForceNonZero,
++            // Little Nightmares II
++            ["010097100edd6000"] = OcclusionQueryFallbackMode.ForceNonZero,
++            // Little Nightmares III
++            ["010066101a55a000"] = OcclusionQueryFallbackMode.ForceNonZero,
++            // Princess Peach: Showtime!
++            ["01007a3009184000"] = OcclusionQueryFallbackMode.ForceNonZero,
++        };
++
++        /// <summary>
++        /// Resolves an override for the given title if the base mode allows automatic detection.
++        /// </summary>
++        /// <param name="titleId">Title id in hexadecimal string format.</param>
++        /// <param name="baseMode">Base configuration mode.</param>
++        /// <returns>The override mode if applicable, otherwise <see cref="OcclusionQueryFallbackMode.Automatic"/>.</returns>
++        public static OcclusionQueryFallbackMode Resolve(string titleId, OcclusionQueryFallbackMode baseMode)
++        {
++            if (baseMode != OcclusionQueryFallbackMode.Automatic || string.IsNullOrEmpty(titleId))
++            {
++                return OcclusionQueryFallbackMode.Automatic;
++            }
++
++            return _overrides.TryGetValue(titleId, out OcclusionQueryFallbackMode mode)
++                ? mode
++                : OcclusionQueryFallbackMode.Automatic;
++        }
++    }
++}
+diff --git a/src/Ryujinx.Graphics.Vulkan/Queries/BufferedQuery.cs b/src/Ryujinx.Graphics.Vulkan/Queries/BufferedQuery.cs
+index c9a546648..077658f69 100644
+--- a/src/Ryujinx.Graphics.Vulkan/Queries/BufferedQuery.cs
++++ b/src/Ryujinx.Graphics.Vulkan/Queries/BufferedQuery.cs
+@@ -164,7 +164,26 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+ 
+                 if (iterations >= MaxQueryRetries)
+                 {
++                    bool stuckOnDefault = data == _defaultValue;
+                     Logger.Error?.Print(LogClass.Gpu, $"Error: Query result {_type} timed out. Took more than {MaxQueryRetries} tries.");
++
++                    if (stuckOnDefault && _type == CounterType.SamplesPassed)
++                    {
++                        OcclusionQueryFallbackMode mode = OcclusionQueryConfig.CurrentMode;
++
++                        if (mode != OcclusionQueryFallbackMode.Automatic)
++                        {
++                            long fallback = mode == OcclusionQueryFallbackMode.ForceZero ? 0 : 1;
++
++                            if (_result32Bit)
++                            {
++                                fallback &= 0xFFFFFFFF;
++                            }
++
++                            Marshal.WriteInt64(_bufferMap, fallback);
++                            data = fallback;
++                        }
++                    }
+                 }
+             }
+ 
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+index 0accef3fb..a88436746 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+@@ -933,6 +933,18 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         public ICounterEvent ReportCounter(CounterType type, EventHandler<ulong> resultHandler, float divisor, bool hostReserved)
+         {
++            if (type == CounterType.SamplesPassed)
++            {
++                OcclusionQueryFallbackMode mode = OcclusionQueryConfig.CurrentMode;
++
++                if (mode == OcclusionQueryFallbackMode.ForceZero || mode == OcclusionQueryFallbackMode.ForceNonZero)
++                {
++                    ulong fallback = mode == OcclusionQueryFallbackMode.ForceZero ? 0ul : 1ul;
++                    resultHandler?.Invoke(null, fallback);
++                    return null;
++                }
++            }
++
+             return _counters.QueueReport(type, resultHandler, divisor, hostReserved);
+         }
+ 
+diff --git a/src/Ryujinx.HLE/Loaders/Processes/Extensions/FileSystemExtensions.cs b/src/Ryujinx.HLE/Loaders/Processes/Extensions/FileSystemExtensions.cs
+index 4ea60dde7..d27fb7cd4 100644
+--- a/src/Ryujinx.HLE/Loaders/Processes/Extensions/FileSystemExtensions.cs
++++ b/src/Ryujinx.HLE/Loaders/Processes/Extensions/FileSystemExtensions.cs
+@@ -6,6 +6,8 @@ using LibHac.Ns;
+ using LibHac.Tools.FsSystem;
+ using Ryujinx.Common.Configuration;
+ using Ryujinx.Common.Logging;
++using Ryujinx.Graphics.GAL;
++using Ryujinx.Graphics.Gpu;
+ using Ryujinx.HLE.Loaders.Executables;
+ using Ryujinx.Memory;
+ using System.Linq;
+@@ -100,7 +102,8 @@ namespace Ryujinx.HLE.Loaders.Processes.Extensions
+             }
+ 
+             // Initialize GPU.
+-            Graphics.Gpu.GraphicsConfig.TitleId = $"{programId:x16}";
++            GraphicsConfig.TitleId = $"{programId:x16}";
++            OcclusionQueryConfig.ApplyOverride(OcclusionQueryFallbackOverrides.Resolve(GraphicsConfig.TitleId, OcclusionQueryConfig.BaseMode));
+             device.Gpu.HostInitalized.Set();
+ 
+             if (!MemoryBlock.SupportsFlags(MemoryAllocationFlags.ViewCompatible))
+diff --git a/src/Ryujinx.HLE/Loaders/Processes/ProcessLoader.cs b/src/Ryujinx.HLE/Loaders/Processes/ProcessLoader.cs
+index f30590846..adb5c80ca 100644
+--- a/src/Ryujinx.HLE/Loaders/Processes/ProcessLoader.cs
++++ b/src/Ryujinx.HLE/Loaders/Processes/ProcessLoader.cs
+@@ -7,6 +7,8 @@ using LibHac.Tools.Fs;
+ using LibHac.Tools.FsSystem;
+ using LibHac.Tools.FsSystem.NcaUtils;
+ using Ryujinx.Common.Logging;
++using Ryujinx.Graphics.GAL;
++using Ryujinx.Graphics.Gpu;
+ using Ryujinx.HLE.Loaders.Executables;
+ using Ryujinx.HLE.Loaders.Processes.Extensions;
+ using System.Collections.Concurrent;
+@@ -209,7 +211,8 @@ namespace Ryujinx.HLE.Loaders.Processes
+             }
+ 
+             // Explicitly null TitleId to disable the shader cache.
+-            Graphics.Gpu.GraphicsConfig.TitleId = null;
++            GraphicsConfig.TitleId = null;
++            OcclusionQueryConfig.ApplyOverride(OcclusionQueryFallbackMode.Automatic);
+             _device.Gpu.HostInitalized.Set();
+ 
+             ProcessResult processResult = ProcessLoaderHelper.LoadNsos(_device,
+diff --git a/src/Ryujinx.SDL2.Common/Ryujinx.SDL2.Common.csproj b/src/Ryujinx.SDL2.Common/Ryujinx.SDL2.Common.csproj
+index cfd3eb772..895d1a9ce 100644
+--- a/src/Ryujinx.SDL2.Common/Ryujinx.SDL2.Common.csproj
++++ b/src/Ryujinx.SDL2.Common/Ryujinx.SDL2.Common.csproj
+@@ -5,7 +5,7 @@
+   </PropertyGroup>
+ 
+   <ItemGroup>
+-    <PackageReference Include="Ryujinx.SDL2-CS-Redux" />
++    <PackageReference Include="Ryujinx.SDL2-CS" />
+   </ItemGroup>
+ 
+   <ItemGroup>
+-- 
+2.43.0
+
