@@ -1,0 +1,110 @@
+name: Build Debug Ryujinx ARM64
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'ryubing/*.patch'
+      - 'kenji-nx/*.patch'
+      - '.github/workflows/build-debug.yml'
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  DOTNET_NOLOGO: true
+
+jobs:
+  build:
+    name: Build ${{ matrix.fork.name }} (Debug)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        fork:
+          - name: ryubing
+            repo: https://git.ryujinx.app/ryubing/ryujinx.git
+            commit: fdbdb05cb583a1604ada310d160791bd945f758e
+            patch: ryubing/0001-occlusion-query-fix.patch
+          - name: kenji-nx
+            repo: https://git.ryujinx.app/kenji-nx/ryujinx.git
+            commit: f908bfe150934296766904bf325889a7df3ac18b
+            patch: kenji-nx/0001-occlusion-query-fix.patch
+
+    steps:
+      - name: Checkout patches repository
+        uses: actions/checkout@v4
+        with:
+          path: patches
+
+      - name: Clone Ryujinx fork
+        run: |
+          git clone ${{ matrix.fork.repo }} ryujinx
+          cd ryujinx
+          git checkout ${{ matrix.fork.commit }}
+
+      - name: Get version from fork
+        id: version
+        run: |
+          cd ryujinx
+          # Get version from git tags/describe
+          FULL_VERSION=$(git describe --tags --always 2>/dev/null || echo "unknown")
+          DISPLAY_VERSION="${FULL_VERSION}-patched-debug"
+
+          # Strip "Canary-" and "v" prefix for dotnet build (SemVer requirement)
+          BUILD_VERSION="${FULL_VERSION#v}"
+          BUILD_VERSION="${BUILD_VERSION#Canary-}"
+          BUILD_VERSION="${BUILD_VERSION}-patched-debug"
+
+          echo "version=$BUILD_VERSION" >> $GITHUB_OUTPUT
+          echo "display_version=$DISPLAY_VERSION" >> $GITHUB_OUTPUT
+          echo "Using build version: $BUILD_VERSION"
+          echo "Using display version: $DISPLAY_VERSION"
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: ryujinx/global.json
+
+      - name: Apply patch
+        run: |
+          cd ryujinx
+          git apply ../patches/${{ matrix.fork.patch }}
+
+      - name: Get short commit hash
+        id: git_hash
+        run: |
+          cd ryujinx
+          echo "hash=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Build Ryujinx ARM64 (Debug)
+        run: |
+          cd ryujinx
+          dotnet publish -c Debug -r linux-arm64 -o ./publish \
+            -p:Version="${{ steps.version.outputs.version }}" \
+            -p:DebugType=embedded \
+            -p:SourceRevisionId="${{ steps.git_hash.outputs.hash }}" \
+            -p:ExtraDefineConstants=DISABLE_UPDATER \
+            src/Ryujinx --self-contained
+
+      - name: Set executable permissions
+        run: |
+          cd ryujinx/publish
+          chmod +x Ryujinx Ryujinx.sh
+
+      - name: Create archive
+        run: |
+          cd ryujinx
+          tar -czf ../ryujinx-${{ matrix.fork.name }}-linux-arm64-patched-debug.tar.gz -C publish .
+
+      - name: Save version info
+        run: |
+          echo "${{ steps.version.outputs.display_version }}" > version-${{ matrix.fork.name }}-debug.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ryujinx-${{ matrix.fork.name }}-linux-arm64-patched-debug-${{ steps.git_hash.outputs.hash }}
+          path: |
+            ryujinx-${{ matrix.fork.name }}-linux-arm64-patched-debug.tar.gz
+            version-${{ matrix.fork.name }}-debug.txt
+          retention-days: 7
